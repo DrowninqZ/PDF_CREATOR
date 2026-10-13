@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { bitable } from '@lark-base-open/js-sdk';
-import { BaseGateway, type StringRecord } from './bitable/client';
+import { BaseGateway, type StringRecord, type TableMetaInfo } from './bitable/client';
 import { MappingPanel } from './components/MappingPanel';
 import { OutputPanel } from './components/OutputPanel';
 import { PreviewPane } from './components/PreviewPane';
 import { RecordPanel } from './components/RecordPanel';
 import { TemplatePanel } from './components/TemplatePanel';
 import { downloadBlob, zipBlobs } from './pdf/export';
-import { renderPdfBlob, safeFileName } from './pdf/render';
+import { renderMergedPdfBlob, renderPdfBlob, safeFileName } from './pdf/render';
 import { DEFAULT_TEMPLATE } from './template/defaultTemplate';
 import {
   buildDocument,
@@ -19,12 +19,23 @@ import type {
   GeneratedItem,
   Mapping,
   PersistedConfig,
+  RecordCell,
   RecordInfo,
 } from './types';
 
 const STORAGE_KEY = 'lark-base-form-pdf:config:v1';
 
+/** 「记录名称字段」选中多个字段时，各列值之间的连接符（用于文件名与列表标题） */
+const TITLE_SEPARATOR = ' / ';
+
 type Status = 'loading' | 'ready' | 'error';
+
+/** 合并生成的单个 PDF 结果 */
+interface MergedResult {
+  url: string;
+  fileName: string;
+  count: number;
+}
 
 function loadConfig(): PersistedConfig {
   try {
@@ -102,22 +113,51 @@ function buildValues(
   return values;
 }
 
+/**
+ * 根据「记录名称字段」选中的列，从一条记录里取出各列的名称与值。
+ * title 为各列值拼接结果（供文件名与列表标题使用），无值时回退到记录 ID。
+ */
+function buildTitleCells(
+  row: StringRecord | undefined,
+  fieldIds: string[],
+  nameById: Map<string, string>,
+): { title: string; cells: RecordCell[] } {
+  const cells: RecordCell[] = fieldIds.map((fieldId) => ({
+    fieldId,
+    name: nameById.get(fieldId) ?? fieldId,
+    value: row?.fields[fieldId] ?? '',
+  }));
+  const title = cells
+    .map((cell) => cell.value)
+    .filter((value) => value !== '')
+    .join(TITLE_SEPARATOR);
+  return { title, cells };
+}
+
 export default function App() {
   const gatewayRef = useRef<BaseGateway | null>(null);
   const resultsRef = useRef<GeneratedItem[]>([]);
+  const mergedRef = useRef<MergedResult | null>(null);
 
   const [status, setStatus] = useState<Status>('loading');
   const [errorMsg, setErrorMsg] = useState('');
 
   const [fields, setFields] = useState<FieldInfo[]>([]);
+  const [tables, setTables] = useState<TableMetaInfo[]>([]);
+  const [tableListError, setTableListError] = useState('');
+  const [activeTableId, setActiveTableId] = useState('');
+  const [switching, setSwitching] = useState(false);
   const [records, setRecords] = useState<RecordInfo[]>([]);
   const [recordData, setRecordData] = useState<Map<string, StringRecord>>(new Map());
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [recordsLoading, setRecordsLoading] = useState(false);
 
+  const [filterFieldId, setFilterFieldId] = useState('');
+  const [filterKeyword, setFilterKeyword] = useState('');
+
   const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
   const [mapping, setMapping] = useState<Mapping>({});
-  const [titleFieldId, setTitleFieldId] = useState('');
+  const [titleFieldIds, setTitleFieldIds] = useState<string[]>([]);
   const [attachmentFieldId, setAttachmentFieldId] = useState('');
 
   const [writeBack, setWriteBack] = useState(false);
@@ -126,28 +166,53 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [results, setResults] = useState<GeneratedItem[]>([]);
+  const [merged, setMerged] = useState<MergedResult | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
 
   const placeholders = useMemo(() => extractPlaceholders(template), [template]);
 
+  // 第 3 步的筛选结果：筛选（或未筛选时的全部记录）界定了可生成的范围
+  const visibleRecords = useMemo(() => {
+    const key = filterKeyword.trim().toLowerCase();
+    if (!key) return records;
+    return records.filter((record) => {
+      // 未选择列时按记录名称匹配，否则取该记录在所选列下的文本值
+      const text = filterFieldId
+        ? (recordData.get(record.id)?.fields[filterFieldId] ?? '')
+        : record.title;
+      return text.toLowerCase().includes(key);
+    });
+  }, [records, recordData, filterFieldId, filterKeyword]);
+
+  // 实际参与生成的记录：已勾选 且 通过筛选
   const selectedRecords = useMemo(
-    () => records.filter((record) => selected.has(record.id)),
-    [records, selected],
+    () => visibleRecords.filter((record) => selected.has(record.id)),
+    [visibleRecords, selected],
   );
 
-  const previewRecord = selectedRecords[0] ?? records[0];
+  const previewRecord = selectedRecords[0] ?? visibleRecords[0];
+
+  // 「记录名称字段」选中的列（顺序与每条记录的 cells 一致），作为明细表表头
+  const titleFields = useMemo(
+    () =>
+      titleFieldIds
+        .map((fieldId) => fields.find((field) => field.id === fieldId))
+        .filter((field): field is FieldInfo => Boolean(field)),
+    [titleFieldIds, fields],
+  );
 
   const loadRecords = useCallback(
-    async (gateway: BaseGateway, titleId: string) => {
+    async (gateway: BaseGateway, titleIds: string[], fieldList: FieldInfo[]) => {
       setRecordsLoading(true);
       try {
-        const { viewId } = await gateway.getSelection();
+        const viewId = await gateway.resolveViewId();
         const rows = await gateway.listStringRecords(viewId);
         setRecordData(new Map(rows.map((row) => [row.recordId, row])));
-        const infos: RecordInfo[] = rows.map((row) => ({
-          id: row.recordId,
-          title: (titleId ? row.fields[titleId] : '') || row.recordId,
-        }));
+        const nameById = new Map(fieldList.map((field) => [field.id, field.name]));
+        const infos: RecordInfo[] = rows.map((row) => {
+          const { title, cells } = buildTitleCells(row, titleIds, nameById);
+          return { id: row.recordId, title: title || row.recordId, cells };
+        });
         setRecords(infos);
         setSelected(new Set(infos.map((info) => info.id)));
       } finally {
@@ -177,6 +242,12 @@ export default function App() {
           throw new Error('当前页面不在多维表格插件环境中');
         }
         const fieldList = await gateway.listFields();
+        let tableList: TableMetaInfo[] = [];
+        try {
+          tableList = await BaseGateway.listTables();
+        } catch (error) {
+          setTableListError(error instanceof Error ? error.message : String(error));
+        }
         if (cancelled) return;
 
         const config = loadConfig();
@@ -191,10 +262,19 @@ export default function App() {
           }
         }
 
-        const resolvedTitle =
-          idByName.get(config.titleFieldName ?? '') ??
-          fieldList.find((field) => field.isPrimary)?.id ??
-          '';
+        // 「记录名称字段」：优先用上次保存的多列配置，否则退回索引列
+        const savedTitleNames =
+          config.titleFieldNames && config.titleFieldNames.length > 0
+            ? config.titleFieldNames
+            : config.titleFieldName
+              ? [config.titleFieldName]
+              : [];
+        const savedTitleIds = savedTitleNames
+          .map((name) => idByName.get(name))
+          .filter((id): id is string => Boolean(id));
+        const primaryTitleId = fieldList.find((field) => field.isPrimary)?.id;
+        const resolvedTitleIds =
+          savedTitleIds.length > 0 ? savedTitleIds : primaryTitleId ? [primaryTitleId] : [];
         const resolvedAttachment = idByName.get(config.attachmentFieldName ?? '') ?? '';
 
         // 按名称自动匹配尚未映射的占位符
@@ -207,14 +287,16 @@ export default function App() {
 
         gatewayRef.current = gateway;
         setFields(fieldList);
+        setTables(tableList);
+        setActiveTableId(selection.tableId);
         setTemplate(initialTemplate);
-        setTitleFieldId(resolvedTitle);
+        setTitleFieldIds(resolvedTitleIds);
         setAttachmentFieldId(resolvedAttachment);
         setMapping(initialMapping);
         setWriteBack(Boolean(resolvedAttachment));
         setStatus('ready');
 
-        await loadRecords(gateway, resolvedTitle);
+        await loadRecords(gateway, resolvedTitleIds, fieldList);
       } catch (error) {
         if (cancelled) return;
         setStatus('error');
@@ -239,19 +321,26 @@ export default function App() {
     saveConfig({
       template,
       mappingByName,
-      titleFieldName: nameById.get(titleFieldId),
+      titleFieldNames: titleFieldIds
+        .map((fieldId) => nameById.get(fieldId))
+        .filter((name): name is string => Boolean(name)),
       attachmentFieldName: nameById.get(attachmentFieldId),
     });
-  }, [status, fields, mapping, template, titleFieldId, attachmentFieldId]);
+  }, [status, fields, mapping, template, titleFieldIds, attachmentFieldId]);
 
   // 同步结果引用，并在插件卸载时释放 object URL
   useEffect(() => {
     resultsRef.current = results;
   }, [results]);
 
+  useEffect(() => {
+    mergedRef.current = merged;
+  }, [merged]);
+
   useEffect(
     () => () => {
       resultsRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+      if (mergedRef.current) URL.revokeObjectURL(mergedRef.current.url);
     },
     [],
   );
@@ -290,17 +379,20 @@ export default function App() {
     [fields],
   );
 
-  const handleTitleFieldChange = useCallback(
-    (fieldId: string) => {
-      setTitleFieldId(fieldId);
+  const handleTitleFieldsChange = useCallback(
+    (fieldIds: string[]) => {
+      setTitleFieldIds(fieldIds);
+      // 筛选列已不在展示列中时，重置筛选列，避免下拉显示为空
+      setFilterFieldId((prev) => (prev && !fieldIds.includes(prev) ? '' : prev));
+      const nameById = new Map(fields.map((field) => [field.id, field.name]));
       setRecords((prev) =>
-        prev.map((record) => ({
-          ...record,
-          title: (fieldId ? recordData.get(record.id)?.fields[fieldId] : '') || record.id,
-        })),
+        prev.map((record) => {
+          const { title, cells } = buildTitleCells(recordData.get(record.id), fieldIds, nameById);
+          return { ...record, title: title || record.id, cells };
+        }),
       );
     },
-    [recordData],
+    [fields, recordData],
   );
 
   const handleToggle = useCallback((recordId: string) => {
@@ -322,11 +414,11 @@ export default function App() {
 
   const handlePickInteractively = useCallback(async () => {
     const gateway = gatewayRef.current;
-    if (!gateway) return;
+    if (!gateway || !activeTableId) return;
     try {
-      const { tableId, viewId } = await gateway.getSelection();
-      if (!tableId || !viewId) return;
-      const picked = await bitable.ui.selectRecordIdList(tableId, viewId);
+      const viewId = await gateway.resolveViewId();
+      if (!viewId) return;
+      const picked = await bitable.ui.selectRecordIdList(activeTableId, viewId);
       if (picked && picked.length > 0) setSelected(new Set(picked));
     } catch (error) {
       setLogs((prev) => [
@@ -334,19 +426,59 @@ export default function App() {
         `交互选择失败：${error instanceof Error ? error.message : String(error)}`,
       ]);
     }
-  }, []);
+  }, [activeTableId]);
 
   const handleReloadRecords = useCallback(() => {
     const gateway = gatewayRef.current;
-    if (gateway) void loadRecords(gateway, titleFieldId);
-  }, [loadRecords, titleFieldId]);
+    if (gateway) void loadRecords(gateway, titleFieldIds, fields);
+  }, [loadRecords, titleFieldIds, fields]);
 
-  const ensureResultsZip = useCallback(async () => {
-    const zip = await zipBlobs(
-      results.map((item) => ({ name: item.fileName, blob: item.blob })),
-    );
-    downloadBlob(zip, `表单PDF_${stampString()}.zip`);
-  }, [results]);
+  /** 切换到另一个数据表：保留模板，按新表字段重新映射并重新加载记录 */
+  const handleSwitchTable = useCallback(
+    async (tableId: string) => {
+      const gateway = gatewayRef.current;
+      if (!gateway || !tableId || tableId === activeTableId) return;
+      setSwitching(true);
+      try {
+        const nextGateway = await BaseGateway.openTable(tableId);
+        const fieldList = await nextGateway.listFields();
+
+        // 保留模板文本，按字段名对新表重建映射
+        const nextMapping: Mapping = {};
+        for (const key of extractPlaceholders(template)) {
+          if (isBuiltinPlaceholder(key)) continue;
+          const matched = fieldList.find((field) => field.name === key);
+          nextMapping[key] = matched?.id ?? '';
+        }
+        const primaryId = fieldList.find((field) => field.isPrimary)?.id;
+        const nextTitleIds = primaryId ? [primaryId] : [];
+
+        gatewayRef.current = nextGateway;
+        setActiveTableId(tableId);
+        setFields(fieldList);
+        setMapping(nextMapping);
+        setTitleFieldIds(nextTitleIds);
+        setAttachmentFieldId('');
+        setWriteBack(false);
+        setFilterFieldId('');
+        setFilterKeyword('');
+        resultsRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+        setResults([]);
+
+        await loadRecords(nextGateway, nextTitleIds, fieldList);
+        const name = tables.find((table) => table.id === tableId)?.name ?? tableId;
+        setLogs((prev) => [...prev, `已切换到数据表「${name}」`]);
+      } catch (error) {
+        setLogs((prev) => [
+          ...prev,
+          `切换数据表失败：${error instanceof Error ? error.message : String(error)}`,
+        ]);
+      } finally {
+        setSwitching(false);
+      }
+    },
+    [activeTableId, template, tables, loadRecords],
+  );
 
   const handleGenerate = useCallback(async () => {
     const gateway = gatewayRef.current;
@@ -430,6 +562,38 @@ export default function App() {
     downloadZip,
   ]);
 
+  /** 把所选记录的表单合并成同一个 PDF（每条记录从新的一页开始） */
+  const handleGenerateMerged = useCallback(async () => {
+    if (selectedRecords.length === 0) return;
+
+    setGenerating(true);
+    setLogs([]);
+    setProgress({ done: 0, total: selectedRecords.length });
+
+    try {
+      const htmlList: string[] = [];
+      for (let index = 0; index < selectedRecords.length; index += 1) {
+        const record = selectedRecords[index];
+        const row = recordData.get(record.id);
+        htmlList.push(buildDocument(template, buildValues(row, index, placeholders, mapping)));
+        setProgress({ done: index + 1, total: selectedRecords.length });
+      }
+
+      const blob = await renderMergedPdfBlob(htmlList);
+      const fileName = `表单PDF_合并_${selectedRecords.length}条_${stampString()}.pdf`;
+
+      if (mergedRef.current) URL.revokeObjectURL(mergedRef.current.url);
+      const url = URL.createObjectURL(blob);
+      setMerged({ url, fileName, count: selectedRecords.length });
+      downloadBlob(blob, fileName);
+      setLogs([`已把 ${selectedRecords.length} 条记录的表单合并到同一个 PDF`]);
+    } catch (error) {
+      setLogs([`合并生成失败：${error instanceof Error ? error.message : String(error)}`]);
+    } finally {
+      setGenerating(false);
+    }
+  }, [selectedRecords, recordData, template, placeholders, mapping]);
+
   if (status === 'loading') {
     return (
       <div className="app-state">
@@ -460,6 +624,36 @@ export default function App() {
         </button>
       </header>
 
+      {ready && (
+        <div className="table-bar">
+          <span className="muted">数据表</span>
+          {tables.length > 0 ? (
+            <select
+              value={activeTableId}
+              onChange={(event) => void handleSwitchTable(event.target.value)}
+              disabled={switching}
+            >
+              {tables.map((table) => (
+                <option key={table.id} value={table.id}>
+                  {table.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="muted">未能读取数据表列表</span>
+          )}
+          <span className="muted">
+            {tables.length > 1
+              ? `当前多维表格共 ${tables.length} 个数据表，可切换${switching ? '（切换中…）' : ''}`
+              : tables.length === 1
+                ? '当前多维表格只有 1 个数据表，无需切换'
+                : tableListError
+                  ? `读取数据表列表失败：${tableListError}`
+                  : '数据表列表为空'}
+          </span>
+        </div>
+      )}
+
       {!ready && (
         <div className="app-banner">
           <strong>未连接多维表格：</strong>
@@ -482,15 +676,22 @@ export default function App() {
             placeholders={placeholders}
             fields={fields}
             mapping={mapping}
-            titleFieldId={titleFieldId}
+            titleFieldIds={titleFieldIds}
             onMappingChange={handleMappingChange}
-            onTitleFieldChange={handleTitleFieldChange}
+            onTitleFieldsChange={handleTitleFieldsChange}
             onAutoMap={handleAutoMap}
           />
           <RecordPanel
-            records={records}
+            records={visibleRecords}
+            titleFields={titleFields}
+            totalCount={records.length}
+            selectedCount={selectedRecords.length}
             selected={selected}
             loading={recordsLoading}
+            filterFieldId={filterFieldId}
+            filterKeyword={filterKeyword}
+            onFilterFieldChange={setFilterFieldId}
+            onFilterKeywordChange={setFilterKeyword}
             onReload={handleReloadRecords}
             onToggle={handleToggle}
             onSelectAll={handleSelectAll}
@@ -505,13 +706,14 @@ export default function App() {
             generating={generating}
             progress={progress}
             results={results}
+            merged={merged}
             selectedCount={selectedRecords.length}
             logs={logs}
             onAttachmentFieldChange={setAttachmentFieldId}
             onWriteBackChange={setWriteBack}
             onDownloadZipChange={setDownloadZip}
             onGenerate={handleGenerate}
-            onDownloadZipAll={ensureResultsZip}
+            onGenerateMerged={handleGenerateMerged}
           />
         </div>
 

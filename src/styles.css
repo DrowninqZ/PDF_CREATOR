@@ -61,6 +61,24 @@ body {
   flex: 1;
 }
 
+/* 数据表切换条 */
+.table-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 16px 0;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f7f9fc;
+  font-size: 12px;
+}
+
+.table-bar select {
+  min-width: 160px;
+  max-width: 320px;
+}
+
 .app-banner {
   margin: 12px 16px 0;
   padding: 10px 14px;
@@ -357,20 +375,128 @@ select {
   color: var(--text);
 }
 
-.field-row {
+/* 选择记录：按钮与筛选栏合并为一行 */
+.record-toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-wrap: nowrap;
 }
 
-.field-row label {
+.record-toolbar .btn {
   flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.record-toolbar .search {
+  min-width: 80px;
+}
+
+/* 按列筛选的列选择框：收窄内容，过长省略 */
+select.filter-field {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 「记录名称字段」多选配置 */
+.field-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field-block > label {
   color: var(--muted);
   font-size: 12px;
 }
 
-.field-row select {
-  max-width: 260px;
+.field-hint {
+  margin: 0;
+}
+
+/* 字段多选下拉 */
+.multiselect {
+  width: 100%;
+  max-width: 320px;
+}
+
+.multiselect-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.multiselect-trigger:hover {
+  border-color: var(--primary);
+}
+
+.multiselect-placeholder {
+  color: var(--muted);
+}
+
+.multiselect-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.multiselect-arrow {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.multiselect-panel {
+  margin-top: 4px;
+  max-height: 190px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 4px 12px rgba(31, 35, 41, 0.1);
+}
+
+.multiselect-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.multiselect-option:hover {
+  background: #f5f7fb;
+}
+
+.multiselect-actions {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.multiselect-actions .btn {
+  flex: 1;
 }
 
 .search {
@@ -399,6 +525,11 @@ select {
   font-size: 12px;
 }
 
+/* 明细表：每行按表头列对齐 */
+.record-item.record-grid {
+  display: grid;
+}
+
 .record-item:last-child {
   border-bottom: none;
 }
@@ -407,14 +538,46 @@ select {
   background: #f7f9fc;
 }
 
-.record-index {
-  width: 28px;
+/* 明细表表头：列名横向排列，滚动时吸顶 */
+.record-head {
+  display: grid;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #f7f9fc;
   color: var(--muted);
-  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* 表头的全选复选框 */
+.record-all {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* 未选展示列时，表头只保留全选复选框 */
+.record-head-plain {
+  grid-template-columns: 1fr;
+  justify-items: start;
 }
 
 .record-title {
   flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 明细表的列（表头列名 / 单元格值） */
+.record-col {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -479,6 +642,27 @@ select {
 
 .result-head {
   margin: 14px 0 6px;
+}
+
+/* 合并为一个 PDF 的结果 */
+.merged-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f7f9fc;
+  font-size: 12px;
+}
+
+.merged-result a {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .result-list {

@@ -9,16 +9,17 @@ interface OutputPanelProps {
   generating: boolean;
   progress: { done: number; total: number };
   results: GeneratedItem[];
+  merged: { url: string; fileName: string; count: number } | null;
   selectedCount: number;
   logs: string[];
   onAttachmentFieldChange: (fieldId: string) => void;
   onWriteBackChange: (value: boolean) => void;
   onDownloadZipChange: (value: boolean) => void;
   onGenerate: () => void;
-  onDownloadZipAll: () => void;
+  onGenerateMerged: () => void;
 }
 
-/** 生成与输出：写回附件字段 / 打包 ZIP / 单独下载链接 */
+/** 生成与输出：写回附件字段 / 打包 ZIP / 合并为一个 PDF / 单独下载链接 */
 export function OutputPanel({
   fields,
   attachmentFieldId,
@@ -27,13 +28,14 @@ export function OutputPanel({
   generating,
   progress,
   results,
+  merged,
   selectedCount,
   logs,
   onAttachmentFieldChange,
   onWriteBackChange,
   onDownloadZipChange,
   onGenerate,
-  onDownloadZipAll,
+  onGenerateMerged,
 }: OutputPanelProps) {
   const attachmentFields = fields.filter((field) => field.type === FieldType.Attachment);
   const percent = progress.total === 0 ? 0 : Math.round((progress.done / progress.total) * 100);
@@ -92,12 +94,31 @@ export function OutputPanel({
         >
           {generating ? `生成中 ${progress.done}/${progress.total}` : `生成 PDF（${selectedCount} 条）`}
         </button>
-        {results.length > 0 && (
-          <button type="button" className="btn ghost" onClick={onDownloadZipAll}>
-            下载全部（ZIP · {results.length} 个）
-          </button>
-        )}
+        <button
+          type="button"
+          className="btn ghost"
+          disabled={generating || selectedCount === 0 || writeBack}
+          onClick={onGenerateMerged}
+          title="把所选记录的表单合并到同一个 PDF，每条记录从新的一页开始"
+        >
+          合并为一个 PDF（{selectedCount} 条）
+        </button>
       </div>
+
+      {writeBack && (
+        <div className="warn">
+          已勾选「回写附件字段」：附件需按记录逐个写入，因此不支持「合并为一个 PDF」。如需合并，请先取消回写。
+        </div>
+      )}
+
+      {merged && (
+        <div className="merged-result">
+          <span className="muted">合并结果（{merged.count} 条记录 · 1 个 PDF）</span>
+          <a href={merged.url} download={merged.fileName}>
+            {merged.fileName}
+          </a>
+        </div>
+      )}
 
       {generating && (
         <div className="progress">
