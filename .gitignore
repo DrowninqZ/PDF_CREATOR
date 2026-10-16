@@ -2,7 +2,7 @@
 node_modules
 
 # 构建产物
-dist
+# dist 需随仓库提交：飞书插件提交流程会校验构建产物是否一同提交
 dist-ssr
 
 # 日志
