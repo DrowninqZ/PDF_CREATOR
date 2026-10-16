@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>表单 PDF 插件 · 使用统计</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>表单 PDF 插件 · 使用统计</h1>
+      <div class="topbar-actions">
+        <label>
+          时间范围
+          <select id="range">
+            <option value="7">近 7 天</option>
+            <option value="30" selected>近 30 天</option>
+            <option value="90">近 90 天</option>
+            <option value="0">全部</option>
+          </select>
+        </label>
+        <label>
+          口令
+          <input id="token" type="password" placeholder="ADMIN_TOKEN" autocomplete="off" />
+        </label>
+        <button id="refresh" type="button" class="btn">刷新</button>
+      </div>
+    </header>
+
+    <main>
+      <p id="error" class="error" hidden></p>
+
+      <section class="cards" id="cards"></section>
+
+      <section class="pane">
+        <h2>每日生成次数</h2>
+        <div id="chart" class="chart"></div>
+        <p id="chart-empty" class="empty" hidden>该时间范围内暂无数据</p>
+      </section>
+
+      <section class="pane">
+        <h2>按使用人统计</h2>
+        <div id="users"></div>
+      </section>
+
+      <section class="pane">
+        <h2>使用明细</h2>
+        <div class="filters">
+          <input id="filter-keyword" placeholder="搜索 使用人 / Base / 数据表" />
+          <select id="filter-event">
+            <option value="">全部事件</option>
+            <option value="generate">生成 PDF</option>
+            <option value="open">打开插件</option>
+          </select>
+          <button id="filter-apply" type="button" class="btn">筛选</button>
+          <button id="export" type="button" class="btn ghost">导出 CSV</button>
+        </div>
+        <div id="logs"></div>
+        <div class="pager">
+          <button id="prev" type="button" class="btn ghost">上一页</button>
+          <span id="page-info" class="muted"></span>
+          <button id="next" type="button" class="btn ghost">下一页</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

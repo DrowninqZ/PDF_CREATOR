@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { bitable } from '@lark-base-open/js-sdk';
+import { reportUsage } from './analytics';
 import { BaseGateway, type StringRecord, type TableMetaInfo } from './bitable/client';
 import { MappingPanel } from './components/MappingPanel';
 import { OutputPanel } from './components/OutputPanel';
@@ -201,6 +202,12 @@ export default function App() {
     [titleFieldIds, fields],
   );
 
+  /** 当前数据表名称，用于使用统计上报 */
+  const activeTableName = useMemo(
+    () => tables.find((table) => table.id === activeTableId)?.name ?? '',
+    [tables, activeTableId],
+  );
+
   const loadRecords = useCallback(
     async (gateway: BaseGateway, titleIds: string[], fieldList: FieldInfo[]) => {
       setRecordsLoading(true);
@@ -297,6 +304,11 @@ export default function App() {
         setStatus('ready');
 
         await loadRecords(gateway, resolvedTitleIds, fieldList);
+        reportUsage({
+          event: 'open',
+          tableId: selection.tableId,
+          tableName: tableList.find((table) => table.id === selection.tableId)?.name ?? '',
+        });
       } catch (error) {
         if (cancelled) return;
         setStatus('error');
@@ -545,6 +557,17 @@ export default function App() {
         );
         downloadBlob(zip, `表单PDF_${stampString()}.zip`);
       }
+
+      if (produced.length > 0) {
+        reportUsage({
+          event: 'generate',
+          tableId: activeTableId,
+          tableName: activeTableName,
+          recordCount: produced.length,
+          merged: false,
+          writeBack: Boolean(writeBack && attachmentFieldId),
+        });
+      }
     } catch (error) {
       collected.push(`生成失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -560,6 +583,8 @@ export default function App() {
     writeBack,
     attachmentFieldId,
     downloadZip,
+    activeTableId,
+    activeTableName,
   ]);
 
   /** 把所选记录的表单合并成同一个 PDF（每条记录从新的一页开始） */
@@ -587,12 +612,20 @@ export default function App() {
       setMerged({ url, fileName, count: selectedRecords.length });
       downloadBlob(blob, fileName);
       setLogs([`已把 ${selectedRecords.length} 条记录的表单合并到同一个 PDF`]);
+      reportUsage({
+        event: 'generate',
+        tableId: activeTableId,
+        tableName: activeTableName,
+        recordCount: selectedRecords.length,
+        merged: true,
+        writeBack: false,
+      });
     } catch (error) {
       setLogs([`合并生成失败：${error instanceof Error ? error.message : String(error)}`]);
     } finally {
       setGenerating(false);
     }
-  }, [selectedRecords, recordData, template, placeholders, mapping]);
+  }, [selectedRecords, recordData, template, placeholders, mapping, activeTableId, activeTableName]);
 
   if (status === 'loading') {
     return (

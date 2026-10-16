@@ -26,3 +26,6 @@ pnpm-debug.log*
 
 # 缓存
 .vite
+
+# 统计服务的本地数据库
+server/data
