@@ -11,6 +11,43 @@
 
 ---
 
+## 一键部署（推荐）
+
+如果需要快速上线，直接用现成的离线部署包，**服务器不需要联网**：
+
+```
+pdf-creator-deploy.zip
+  ├─ install.ps1        一键安装脚本
+  ├─ dist\              插件前端构建产物
+  ├─ server\            统计服务（已含生产依赖）
+  ├─ node\node.exe      便携版 Node，服务器无需单独安装
+  ├─ WinSW.exe          服务包装器
+  └─ README.txt
+```
+
+操作就三步：
+
+1. 解压到服务器，例如 `D:\pdf-creator\`
+2. 以**管理员身份**打开 PowerShell，进入该目录
+3. 执行 `.\install.ps1`
+
+脚本会自动完成：检查环境 → 生成配置（随机后台口令）→ 注册 Windows 服务并设为开机自启 → 放通防火墙 → 自检并打印访问地址。
+
+可选参数：
+
+```powershell
+.\install.ps1 -Port 8080                       # 换端口
+.\install.ps1 -AdminToken "你的口令"            # 指定后台口令
+.\install.ps1 -AllowedOrigins "https://xxx"    # 限制上报来源
+.\install.ps1 -Uninstall                       # 卸载服务
+```
+
+> 部署包由 `server/deploy/install.ps1` 加上构建产物组装而成。生成方式见文末「附：重新生成部署包」。
+
+下面的第二~八节是**手动部署步骤**，等价于脚本所做的事，供需要逐步排查或定制时参考。
+
+---
+
 ## 一、前置要求
 
 - Windows Server 2016 及以上
@@ -279,8 +316,58 @@ forfiles /P D:\pdf-creator\logs /M *.log.* /D -30 /C "cmd /c del @path"
 
 ---
 
+## 附：重新生成部署包
+
+一键部署包由以下内容组装而成，需要更新时在开发机重新生成：
+
+```bash
+# 1. 以同源相对地址构建插件前端（不要写死域名）
+VITE_ANALYTICS_ENDPOINT=/api/usage npm run build
+
+# 2. 组装目录
+mkdir -p pdf-creator-deploy/server pdf-creator-deploy/node
+rsync -a --exclude node_modules --exclude data --exclude .env --exclude deploy \
+      server/ pdf-creator-deploy/server/
+rsync -a dist/ pdf-creator-deploy/dist/
+cp server/deploy/install.ps1                              pdf-creator-deploy/
+cp server/deploy/README.txt                               pdf-creator-deploy/
+cp /tmp/pdf-creator-cache/node.exe                         pdf-creator-deploy/node/node.exe
+cp /tmp/pdf-creator-cache/WinSW.exe                        pdf-creator-deploy/WinSW.exe
+
+# 3. 把生产依赖打进包内，服务器就不需要联网
+cd pdf-creator-deploy/server && npm ci --omit=dev && cd ../..
+
+# 4. 打包
+zip -r -X release/pdf-creator-deploy.zip pdf-creator-deploy -x '*.DS_Store'
+```
+
+需要单独准备的两个二进制：
+
+| 文件 | 来源 |
+| --- | --- |
+| `node.exe` | `https://nodejs.org/dist/v26.3.1/win-x64/node.exe`，版本需 ≥ 23.4，宜与开发环境一致 |
+| `WinSW.exe` | NuGet 包 `winsw` 2.11.0 里的 `lib/net461-full/WinSW.NET461.exe` |
+
+> 一键脚本用 **WinSW** 注册服务，而上面第五节手动步骤用的是 **NSSM**，两者作用等价。选 WinSW 是因为它按大小轮换日志时可以指定保留份数（`keepFiles`），NSSM 没有这个参数；同时 NSSM 官网在部分网络环境下不可达。
+
+验证部署包是否完整（服务器上执行）：
+
+```powershell
+.\install.ps1        # 结尾的自检会打印两个地址的 HTTP 状态码
+```
+
+`node_modules` 里**不应有任何 `.node` 原生二进制**，可以用这条命令自查：
+
+```bash
+find pdf-creator-deploy/server/node_modules -name '*.node'
+```
+
+有输出说明依赖不纯，换到对应平台重新 `npm ci`。
+
+---
+
 ## 附：关于"打包成 exe"
 
-不需要。本项目没有任何原生依赖，"装个 Node 就能跑"已经是 Windows 上最省事的部署方式；做成 exe 反而要额外承担体积（约 80MB）、每次改需求都要重新构建、以及未签名 exe 的 SmartScreen 警告等代价。
+不需要。部署包已经把便携版 Node 一起带上了，**服务器不用装 Node、也不用联网**，效果和 exe 一样，却省掉了 exe 的几个代价：体积（Node 运行时同样要带，exe 并不会更小）、每次改需求都要重新构建、以及未签名 exe 首次运行会触发 SmartScreen 警告。
 
-如果服务器实在装不了 Node，可以考虑用 Node 的 SEA 打成单文件 exe，届时联系开发做适配（需要把服务端打包成 CJS 并把静态资源嵌进去）。
+如果后续确实需要单文件 exe（例如要分发给多台机器），再用 Node 的 SEA 打包，届时需要把服务端改成 CJS 入口并把静态资源嵌进去。
