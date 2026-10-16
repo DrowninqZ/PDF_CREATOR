@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 <#
   表单 PDF 插件 —— 统计服务一键部署（Windows Server）
 
