@@ -52,13 +52,19 @@ body {
   font-weight: 600;
 }
 
+/*
+ * 配置区在左、预览固定在右。两栏按比例自适应、永不上下堆叠：
+ * 无论飞书侧边栏（窄）还是独立页（宽）打开，预览都常驻右侧。
+ * 预览内容会随右栏宽度等比缩放，窄屏也不会挤爆、宽屏也不会过宽。
+ */
 .app-body {
   display: grid;
-  grid-template-columns: minmax(420px, 1fr) minmax(420px, 1fr);
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
   gap: 16px;
   padding: 16px;
   overflow: hidden;
   flex: 1;
+  min-height: 0;
 }
 
 /* 数据表切换条 */
@@ -94,12 +100,7 @@ body {
   font-weight: 600;
 }
 
-@media (max-width: 1100px) {
-  .app-body {
-    grid-template-columns: 1fr;
-    overflow: auto;
-  }
-}
+/* 预览始终固定在右侧，窄屏也不再折叠为上下堆叠（见 .app-body） */
 
 .config-column {
   display: flex;
@@ -107,6 +108,8 @@ body {
   gap: 14px;
   overflow-y: auto;
   padding-right: 4px;
+  min-width: 0;
+  min-height: 0;
 }
 
 .pane {
@@ -718,6 +721,8 @@ select.filter-field {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-width: 0;
+  min-height: 0;
 }
 
 .preview-scroll {
