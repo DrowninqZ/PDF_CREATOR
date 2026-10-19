@@ -11,25 +11,11 @@ export async function importTemplateFile(file: File): Promise<string> {
   throw new Error('仅支持导入 .docx 或 .html 文件');
 }
 
-/** Word 文档 -> HTML。mammoth 会保留段落、表格、加粗等语义结构 */
+/** Word 文档 -> HTML：直接解析 OOXML，保留列宽、边框、字号等版式信息 */
 async function importDocx(file: File): Promise<string> {
-  // 动态加载，避免把 Word 解析库打进首屏包
-  const mammoth = (await import('mammoth')).default;
-  const arrayBuffer = await file.arrayBuffer();
-  const result = await mammoth.convertToHtml(
-    { arrayBuffer },
-    {
-      styleMap: [
-        "p[style-name='Title'] => h1:fresh",
-        "p[style-name='Heading 1'] => h1:fresh",
-        "p[style-name='Heading 2'] => h2:fresh",
-        "p[style-name='Heading 3'] => h3:fresh",
-      ],
-    },
-  );
-  const html = result.value.trim();
-  if (!html) throw new Error('这个 Word 文档没有可转换的内容');
-  return buildPageTemplate(html);
+  // 解析器依赖 JSZip，动态加载避免打进首屏包
+  const { docxToTemplate } = await import('./docxImport');
+  return docxToTemplate(await file.arrayBuffer());
 }
 
 /** HTML 文件 -> 模板。完整文档直接用；片段则套用 A4 基础样式 */

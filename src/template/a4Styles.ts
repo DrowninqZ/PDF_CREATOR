@@ -51,3 +51,27 @@ export const A4_BASE_CSS = `
 export function buildPageTemplate(bodyHtml: string): string {
   return composeTemplate(A4_BASE_CSS, `<div class="page">\n${bodyHtml}\n</div>`);
 }
+
+/**
+ * .docx 转换而来的模板专用基础样式。
+ *
+ * 与 A4_BASE_CSS 的关键区别：**不干预**表格、段落、图片的具体呈现。
+ * Word 的版式已经由解析器写成内联样式（列宽、边框、底纹、字号、对齐……），
+ * 这里只保留 A4 纸张盒子和必要的兜底，避免基础样式反过来覆盖原文档的版式。
+ */
+export const A4_DOCX_BASE_CSS = `
+.page {
+  width: 210mm;
+  min-height: 297mm;
+  box-sizing: border-box;
+  padding: 16mm 15mm;
+  background: #ffffff;
+  color: #000000;
+  font-size: 10.5pt;
+  line-height: 1.4;
+  overflow-wrap: break-word;
+}
+.page p { margin: 0; }
+.page table { border-collapse: collapse; }
+.page img { max-width: 100%; }
+`;
