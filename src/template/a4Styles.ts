@@ -74,4 +74,6 @@ export const A4_DOCX_BASE_CSS = `
 .page p { margin: 0; }
 .page table { border-collapse: collapse; }
 .page img { max-width: 100%; }
+/* 多页堆叠预览时页与页之间留出间隔；导出按每页元素逐个截图，不进入 PDF */
+.page + .page { margin-top: 12mm; }
 `;

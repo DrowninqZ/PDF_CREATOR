@@ -306,46 +306,96 @@ interface Ctx {
   pageFont: Font;
 }
 
-/* ------------------------------------------------------------------ 行内内容 */
+/* ------------------------------------------------------------------ 分页流模型 */
 
-/** 行内容器（段落 / 超链接 / 修订插入 / 内容控件）里的内容 */
-function renderInline(parent: El, ctx: Ctx, baseRPrs: (El | null)[], baseFont: Font): string {
-  let html = '';
-  for (const child of childEls(parent)) {
+/**
+ * 渲染结果是一个有序流：块内容与分页点按文档顺序排列。
+ *
+ * 分页信号可能出现在任意深度（run 内、段落属性、表格单元格内），
+ * 在内层被「向上提升」成分页点，只在最顶层消费，从而保证
+ * 导出 PDF 的页数、每页内容边界与源文档一致。
+ */
+type FlowItem = { kind: 'block'; html: string } | { kind: 'break' };
+type Flow = FlowItem[];
+
+const BREAK: FlowItem = { kind: 'break' };
+
+/** `<w:br w:type="page"/>`：硬分页（区别于普通换行 `<w:br/>`） */
+const isPageBreakBr = (el: El): boolean => el.localName === 'br' && wAttr(el, 'type') === 'page';
+
+/** 段落属性是否要求「本段从新页开始」 */
+const breaksBeforeParagraph = (pPr: El | null): boolean => onOff(kid(pPr, 'pageBreakBefore'));
+
+/** 段落级 sectPr：本段之后分节，除 continuous 外都会另起一页 */
+function breaksAfterParagraph(pPr: El | null): boolean {
+  const sectPr = kid(pPr, 'sectPr');
+  if (!sectPr) return false;
+  const type = wVal(kid(sectPr, 'type'));
+  return type === null || type === 'nextPage' || type === 'evenPage' || type === 'oddPage';
+}
+
+const flowHasBreak = (flow: Flow): boolean => flow.some((item) => item.kind === 'break');
+const dropBreaks = (flow: Flow): Flow => flow.filter((item) => item.kind !== 'break');
+
+/** 把 src 的分页点并入 dst：src 的首段接在 dst 末段之后，其余各自成为新段 */
+function mergeSegments(dst: string[], src: string[]): void {
+  if (src.length === 0) return;
+  dst[dst.length - 1] += src[0];
+  for (let index = 1; index < src.length; index += 1) dst.push(src[index]);
+}
+
+/* ---- 行内内容（返回「以分页点分隔」的片段序列） ---- */
+
+/** 单个 run 内部：文字、换行、制表符、图片。分页标记处切断片段 */
+function renderRunContentSegments(run: El, ctx: Ctx): string[] {
+  const segments: string[] = [];
+  let buffer = '';
+  const flush = () => {
+    segments.push(buffer);
+    buffer = '';
+  };
+
+  for (const child of childEls(run)) {
     switch (child.localName) {
-      case 'r':
-        html += renderRun(child, ctx, baseRPrs, baseFont);
+      case 'lastRenderedPageBreak':
+        flush();
         break;
-      case 'hyperlink':
-      case 'ins':
-        html += renderInline(child, ctx, baseRPrs, baseFont);
+      case 'br':
+        if (isPageBreakBr(child)) flush();
+        else buffer += '<br>';
         break;
-      case 'sdt':
-      case 'smartTag': {
-        const box = kid(child, 'sdtContent') ?? child;
-        html += renderInline(box, ctx, baseRPrs, baseFont);
+      case 't':
+        buffer += escapeHtml(child.textContent ?? '');
         break;
-      }
+      case 'tab':
+        buffer += '<span style="display:inline-block;width:21pt"></span>';
+        break;
+      case 'noBreakHyphen':
+        buffer += '&#8209;';
+        break;
+      case 'softHyphen':
+        buffer += '&shy;';
+        break;
       case 'drawing':
-        html += renderDrawing(child, ctx);
+        buffer += renderDrawing(child, ctx);
         break;
       case 'pict':
-        html += renderPict(child, ctx);
+        buffer += renderPict(child, ctx);
         break;
       default:
         break;
     }
   }
-  return html;
+
+  flush();
+  return segments;
 }
 
-function renderRun(run: El, ctx: Ctx, baseRPrs: (El | null)[], baseFont: Font): string {
+function renderRunSegments(run: El, ctx: Ctx, baseRPrs: (El | null)[], baseFont: Font): string[] {
   const rPr = kid(run, 'rPr');
   const styles = [baseRPrs, ...styleChain(ctx.sheet, wVal(kid(rPr, 'rStyle'))).map((d) => d.rPr), rPr];
   const rPrs = styles.flat();
   const font = readFont(rPrs, baseFont);
-  const inner = renderRunContent(run, ctx);
-  if (!inner) return '';
 
   const parts: string[] = [];
   if (!sameFont(font, baseFont)) parts.push(fontCss(font));
@@ -364,40 +414,50 @@ function renderRun(run: El, ctx: Ctx, baseRPrs: (El | null)[], baseFont: Font): 
     parts.push('font-size:0.72em');
   }
 
-  return parts.length > 0 ? `<span style="${parts.join(';')}">${inner}</span>` : inner;
+  const open = parts.length > 0 ? `<span style="${parts.join(';')}">` : '';
+  const close = parts.length > 0 ? '</span>' : '';
+
+  return renderRunContentSegments(run, ctx).map((segment) =>
+    segment ? `${open}${segment}${close}` : '',
+  );
 }
 
-/** 单个 run 内部：文字、换行、制表符、图片 */
-function renderRunContent(run: El, ctx: Ctx): string {
-  let html = '';
-  for (const child of childEls(run)) {
+/** 行内容器（段落 / 超链接 / 修订插入 / 内容控件）里的内容 */
+function renderInlineSegments(
+  parent: El,
+  ctx: Ctx,
+  baseRPrs: (El | null)[],
+  baseFont: Font,
+): string[] {
+  const segments: string[] = [''];
+
+  for (const child of childEls(parent)) {
     switch (child.localName) {
-      case 't':
-        html += escapeHtml(child.textContent ?? '');
+      case 'r':
+        mergeSegments(segments, renderRunSegments(child, ctx, baseRPrs, baseFont));
         break;
-      case 'br':
-        html += '<br>';
+      case 'hyperlink':
+      case 'ins':
+        mergeSegments(segments, renderInlineSegments(child, ctx, baseRPrs, baseFont));
         break;
-      case 'tab':
-        html += '<span style="display:inline-block;width:21pt"></span>';
+      case 'sdt':
+      case 'smartTag': {
+        const box = kid(child, 'sdtContent') ?? child;
+        mergeSegments(segments, renderInlineSegments(box, ctx, baseRPrs, baseFont));
         break;
-      case 'noBreakHyphen':
-        html += '&#8209;';
-        break;
-      case 'softHyphen':
-        html += '&shy;';
-        break;
+      }
       case 'drawing':
-        html += renderDrawing(child, ctx);
+        mergeSegments(segments, [renderDrawing(child, ctx)]);
         break;
       case 'pict':
-        html += renderPict(child, ctx);
+        mergeSegments(segments, [renderPict(child, ctx)]);
         break;
       default:
         break;
     }
   }
-  return html;
+
+  return segments;
 }
 
 /* ------------------------------------------------------------------ 图片 */
@@ -445,9 +505,15 @@ function renderPict(pict: El, ctx: Ctx): string {
 
 interface OutCell {
   colSpan: number;
+  /** 起始网格列下标，用于判断首/末列 */
+  gridIndex: number;
+  /** 纵向合并的高度（行数），只在同一张表内有效 */
   rowSpan: number;
-  css: string;
-  content: string;
+  /** 与位置无关的样式：宽度、底纹、垂直对齐、内边距 */
+  baseCss: string;
+  /** 单元格自身声明的边框；undefined 表示继承表格边框 */
+  borders: { top: Border | null | undefined; bottom: Border | null | undefined; left: Border | null | undefined; right: Border | null | undefined };
+  flow: Flow;
 }
 
 interface OutRow {
@@ -455,113 +521,17 @@ interface OutRow {
   cells: OutCell[];
 }
 
-function renderTable(table: El, ctx: Ctx): string {
-  const tblPr = kid(table, 'tblPr');
-  const tblPrs = [
-    ...styleChain(ctx.sheet, wVal(kid(tblPr, 'tblStyle'))).map((d) => d.tblPr),
-    tblPr,
-  ];
+type TableEdges = Record<
+  'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV',
+  Border | null | undefined
+>;
 
-  // 列宽来自 w:tblGrid，是还原版式的核心
-  const grid = kid(table, 'tblGrid');
-  const gridCols = kids(grid, 'gridCol').map((col) => num(wAttr(col, 'w')));
-
-  const tblBorders = pick(tblPrs, 'tblBorders');
-  const edges = {
-    top: readBorder(kid(tblBorders, 'top')),
-    bottom: readBorder(kid(tblBorders, 'bottom')),
-    left: readBorder(kid(tblBorders, 'left')),
-    right: readBorder(kid(tblBorders, 'right')),
-    insideH: readBorder(kid(tblBorders, 'insideH')),
-    insideV: readBorder(kid(tblBorders, 'insideV')),
-  };
-
-  const cellMar = pick(tblPrs, 'tblCellMar');
-  const marginPt = (name: string, fallback: number): number => {
-    const el = kid(cellMar, name);
-    const value = wAttr(el, 'w');
-    return value ? toPt(num(value)) : fallback;
-  };
-  const pad = {
-    top: marginPt('top', 0),
-    right: marginPt('right', DEFAULT_CELL_MARGIN_PT),
-    bottom: marginPt('bottom', 0),
-    left: marginPt('left', DEFAULT_CELL_MARGIN_PT),
-  };
-
-  const rows = kids(table, 'tr');
-  const totalCols = gridCols.length > 0 ? gridCols.length : Math.max(...rows.map(countGridSpan), 1);
-
-  const outRows: OutRow[] = [];
-  /** 网格列下标 -> 正在纵向合并的单元格 */
-  const openMerge = new Map<number, OutCell>();
-
-  rows.forEach((tr, rowIndex) => {
-    const trHeight = kid(kid(tr, 'trPr'), 'trHeight');
-    const height = num(wAttr(trHeight, 'val'));
-    const row: OutRow = { height: height > 0 ? toPt(height) : 0, cells: [] };
-
-    let gridIndex = 0;
-    for (const tc of kids(tr, 'tc')) {
-      const tcPr = kid(tc, 'tcPr');
-      const colSpan = Math.max(num(wVal(kid(tcPr, 'gridSpan'))) || 1, 1);
-
-      const vMerge = kid(tcPr, 'vMerge');
-      // 纵向合并的续格：把它并进上方的单元格，自身不输出
-      if (vMerge && wVal(vMerge) !== 'restart') {
-        const host = openMerge.get(gridIndex);
-        if (host) host.rowSpan += 1;
-        gridIndex += colSpan;
-        continue;
-      }
-
-      const cell = buildCell(tc, tcPr, ctx, {
-        edges,
-        pad,
-        isFirstRow: rowIndex === 0,
-        isLastRow: rowIndex === rows.length - 1,
-        isFirstCol: gridIndex === 0,
-        isLastCol: gridIndex + colSpan >= totalCols,
-        colSpan,
-      });
-      row.cells.push(cell);
-
-      for (let index = gridIndex; index < gridIndex + colSpan; index += 1) {
-        if (vMerge) openMerge.set(index, cell);
-        else openMerge.delete(index);
-      }
-      gridIndex += colSpan;
-    }
-
-    outRows.push(row);
-  });
-
-  const style: string[] = ['border-collapse:collapse'];
-  const tableWidth = readTableWidth(pick(tblPrs, 'tblW'), gridCols);
-  if (tableWidth) style.push(`width:${tableWidth}`);
-  if (gridCols.length > 0) style.push('table-layout:fixed');
-
-  const jc = wVal(pick(tblPrs, 'jc'));
-  if (jc === 'center') {
-    style.push('margin-left:auto', 'margin-right:auto');
-  } else {
-    const indent = num(wAttr(pick(tblPrs, 'tblInd'), 'w'));
-    if (indent > 0) style.push(`margin-left:${round(toPt(indent))}pt`);
-  }
-
-  const colgroup =
-    gridCols.length > 0
-      ? `<colgroup>${gridCols.map((w) => `<col style="width:${round(toPt(w))}pt">`).join('')}</colgroup>`
-      : '';
-
-  const body = outRows
-    .map((row) => {
-      const attr = row.height > 0 ? ` style="height:${round(row.height)}pt"` : '';
-      return `<tr${attr}>${row.cells.map(serializeCell).join('')}</tr>`;
-    })
-    .join('');
-
-  return `<table style="${style.join(';')}">${colgroup}<tbody>${body}</tbody></table>`;
+interface TableMeta {
+  css: string;
+  colgroup: string;
+  edges: TableEdges;
+  pad: { top: number; right: number; bottom: number; left: number };
+  totalCols: number;
 }
 
 function countGridSpan(tr: El): number {
@@ -584,35 +554,61 @@ function readTableWidth(tblW: El | null, gridCols: number[]): string | null {
   return null;
 }
 
-interface CellOptions {
-  edges: Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', Border | null | undefined>;
-  pad: { top: number; right: number; bottom: number; left: number };
-  isFirstRow: boolean;
-  isLastRow: boolean;
-  isFirstCol: boolean;
-  isLastCol: boolean;
-  colSpan: number;
+function buildTableMeta(
+  tblPrs: (El | null)[],
+  gridCols: number[],
+  totalCols: number,
+): TableMeta {
+  const tblBorders = pick(tblPrs, 'tblBorders');
+  const edges: TableEdges = {
+    top: readBorder(kid(tblBorders, 'top')),
+    bottom: readBorder(kid(tblBorders, 'bottom')),
+    left: readBorder(kid(tblBorders, 'left')),
+    right: readBorder(kid(tblBorders, 'right')),
+    insideH: readBorder(kid(tblBorders, 'insideH')),
+    insideV: readBorder(kid(tblBorders, 'insideV')),
+  };
+
+  const cellMar = pick(tblPrs, 'tblCellMar');
+  const marginPt = (name: string, fallback: number): number => {
+    const value = wAttr(kid(cellMar, name), 'w');
+    return value ? toPt(num(value)) : fallback;
+  };
+  const pad = {
+    top: marginPt('top', 0),
+    right: marginPt('right', DEFAULT_CELL_MARGIN_PT),
+    bottom: marginPt('bottom', 0),
+    left: marginPt('left', DEFAULT_CELL_MARGIN_PT),
+  };
+
+  const css: string[] = ['border-collapse:collapse'];
+  const tableWidth = readTableWidth(pick(tblPrs, 'tblW'), gridCols);
+  if (tableWidth) css.push(`width:${tableWidth}`);
+  if (gridCols.length > 0) css.push('table-layout:fixed');
+
+  const jc = wVal(pick(tblPrs, 'jc'));
+  if (jc === 'center') {
+    css.push('margin-left:auto', 'margin-right:auto');
+  } else {
+    const indent = num(wAttr(pick(tblPrs, 'tblInd'), 'w'));
+    if (indent > 0) css.push(`margin-left:${round(toPt(indent))}pt`);
+  }
+
+  const colgroup =
+    gridCols.length > 0
+      ? `<colgroup>${gridCols.map((w) => `<col style="width:${round(toPt(w))}pt">`).join('')}</colgroup>`
+      : '';
+
+  return { css: css.join(';'), colgroup, edges, pad, totalCols };
 }
 
-function buildCell(tc: El, tcPr: El | null, ctx: Ctx, options: CellOptions): OutCell {
+function buildCell(
+  tc: El,
+  tcPr: El | null,
+  ctx: Ctx,
+  options: { pad: TableMeta['pad']; colSpan: number; gridIndex: number },
+): OutCell {
   const css: string[] = [];
-
-  // 边框：单元格自身 > 表格外框（首行/首列/末行/末列）> 表格内部线
-  const tcBorders = kid(tcPr, 'tcBorders');
-  const side = (name: string, fallback: Border | null | undefined): Border | null | undefined => {
-    const own = readBorder(kid(tcBorders, name));
-    return own === undefined ? fallback : own;
-  };
-  const edges: Array<[string, Border | null | undefined]> = [
-    ['top', side('top', options.isFirstRow ? options.edges.top : options.edges.insideH)],
-    ['bottom', side('bottom', options.isLastRow ? options.edges.bottom : options.edges.insideH)],
-    ['left', side('left', options.isFirstCol ? options.edges.left : options.edges.insideV)],
-    ['right', side('right', options.isLastCol ? options.edges.right : options.edges.insideV)],
-  ];
-  for (const [name, border] of edges) {
-    const value = borderCss(border);
-    if (value) css.push(`border-${name}:${value}`);
-  }
 
   const tcW = kid(tcPr, 'tcW');
   if (wAttr(tcW, 'type') === 'dxa') {
@@ -631,8 +627,7 @@ function buildCell(tc: El, tcPr: El | null, ctx: Ctx, options: CellOptions): Out
 
   const tcMar = kid(tcPr, 'tcMar');
   const padOf = (name: string, fallback: number): number => {
-    const el = kid(tcMar, name);
-    const value = wAttr(el, 'w');
+    const value = wAttr(kid(tcMar, name), 'w');
     return value ? toPt(num(value)) : fallback;
   };
   css.push(
@@ -640,24 +635,193 @@ function buildCell(tc: El, tcPr: El | null, ctx: Ctx, options: CellOptions): Out
       `${round(padOf('bottom', options.pad.bottom))}pt ${round(padOf('left', options.pad.left))}pt`,
   );
 
+  const tcBorders = kid(tcPr, 'tcBorders');
+  const own = (name: string): Border | null | undefined => readBorder(kid(tcBorders, name));
+
   return {
     colSpan: options.colSpan,
+    gridIndex: options.gridIndex,
     rowSpan: 1,
-    css: css.join(';'),
-    content: renderBlockChildren(tc, ctx) || '&nbsp;',
+    baseCss: css.join(';'),
+    borders: { top: own('top'), bottom: own('bottom'), left: own('left'), right: own('right') },
+    flow: renderBlockFlow(tc, ctx),
   };
 }
 
-function serializeCell(cell: OutCell): string {
+/**
+ * 渲染一张表格。若某一行内出现分页点，则在行边界处把表格拆成上下两张，
+ * 分页点落在两者之间；含分页点的那一行整体下移（不丢内容，可能多留空白）。
+ */
+function renderTableFlow(table: El, ctx: Ctx): Flow {
+  const tblPr = kid(table, 'tblPr');
+  const tblPrs = [
+    ...styleChain(ctx.sheet, wVal(kid(tblPr, 'tblStyle'))).map((d) => d.tblPr),
+    tblPr,
+  ];
+
+  // 列宽来自 w:tblGrid，是还原版式的核心
+  const gridCols = kids(kid(table, 'tblGrid'), 'gridCol').map((col) => num(wAttr(col, 'w')));
+  const rows = kids(table, 'tr');
+  const totalCols = gridCols.length > 0 ? gridCols.length : Math.max(...rows.map(countGridSpan), 1);
+  const meta = buildTableMeta(tblPrs, gridCols, totalCols);
+
+  const outRows: OutRow[] = [];
+  /** 网格列下标 -> 正在纵向合并的单元格 */
+  const openMerge = new Map<number, OutCell>();
+
+  rows.forEach((tr) => {
+    const trHeight = kid(kid(tr, 'trPr'), 'trHeight');
+    const height = num(wAttr(trHeight, 'val'));
+    const row: OutRow = { height: height > 0 ? toPt(height) : 0, cells: [] };
+
+    let gridIndex = 0;
+    for (const tc of kids(tr, 'tc')) {
+      const tcPr = kid(tc, 'tcPr');
+      const colSpan = Math.max(num(wVal(kid(tcPr, 'gridSpan'))) || 1, 1);
+
+      const vMerge = kid(tcPr, 'vMerge');
+      // 纵向合并的续格：把它并进上方的单元格，自身不输出
+      if (vMerge && wVal(vMerge) !== 'restart') {
+        const host = openMerge.get(gridIndex);
+        if (host) host.rowSpan += 1;
+        gridIndex += colSpan;
+        continue;
+      }
+
+      const cell = buildCell(tc, tcPr, ctx, { pad: meta.pad, colSpan, gridIndex });
+      row.cells.push(cell);
+
+      for (let index = gridIndex; index < gridIndex + colSpan; index += 1) {
+        if (vMerge) openMerge.set(index, cell);
+        else openMerge.delete(index);
+      }
+      gridIndex += colSpan;
+    }
+
+    outRows.push(row);
+  });
+
+  const splitAt = outRows
+    .map((row, index) => (row.cells.some((cell) => flowHasBreak(cell.flow)) ? index : -1))
+    .filter((index) => index >= 0);
+
+  if (splitAt.length === 0) {
+    return [{ kind: 'block', html: serializeTable(meta, outRows, 0, outRows.length) }];
+  }
+
+  const flow: Flow = [];
+  let start = 0;
+
+  for (const boundary of splitAt) {
+    // 该行整体下移到下一页，其内部的分页点由这次拆分消费掉
+    for (const cell of outRows[boundary].cells) cell.flow = dropBreaks(cell.flow);
+
+    if (boundary > start) {
+      flow.push({ kind: 'block', html: serializeTable(meta, outRows, start, boundary) });
+    }
+    flow.push(BREAK);
+    start = boundary;
+  }
+
+  flow.push({ kind: 'block', html: serializeTable(meta, outRows, start, outRows.length) });
+  return flow;
+}
+
+/**
+ * 跨拆分缝隙的纵向合并：把上半张表里还没结束的合并单元格，
+ * 在下半张表的首行补出续格，避免下半张表出现网格空洞。
+ */
+function collectCarriedMerges(rows: OutRow[], from: number, to: number): OutCell[] {
+  const carried = new Map<number, OutCell>();
+
+  for (let index = 0; index < from; index += 1) {
+    for (const cell of rows[index].cells) {
+      const end = index + cell.rowSpan;
+      if (end <= from) continue;
+
+      const continuation: OutCell = {
+        colSpan: cell.colSpan,
+        gridIndex: cell.gridIndex,
+        rowSpan: Math.min(end, to) - from,
+        baseCss: cell.baseCss,
+        borders: cell.borders,
+        flow: [],
+      };
+      for (let col = cell.gridIndex; col < cell.gridIndex + cell.colSpan; col += 1) {
+        carried.set(col, continuation);
+      }
+    }
+  }
+
+  return Array.from(new Set(carried.values())).sort((a, b) => a.gridIndex - b.gridIndex);
+}
+
+/** 序列化 [from, to) 区间的行；边框按**本张表内**的首/末行、首/末列重算 */
+function serializeTable(meta: TableMeta, rows: OutRow[], from: number, to: number): string {
+  const carried = from > 0 ? collectCarriedMerges(rows, from, to) : [];
+
+  const body = rows
+    .slice(from, to)
+    .map((row, offset) => {
+      const isFirstRow = offset === 0;
+      const isLastRow = offset === to - from - 1;
+      const cells =
+        isFirstRow && carried.length > 0
+          ? [...carried, ...row.cells].sort((a, b) => a.gridIndex - b.gridIndex)
+          : row.cells;
+
+      const attr = row.height > 0 ? ` style="height:${round(row.height)}pt"` : '';
+      const html = cells
+        .map((cell) => serializeCell(meta, cell, from + offset, isFirstRow, isLastRow, to))
+        .join('');
+      return `<tr${attr}>${html}</tr>`;
+    })
+    .join('');
+
+  return `<table style="${meta.css}">${meta.colgroup}<tbody>${body}</tbody></table>`;
+}
+
+function serializeCell(
+  meta: TableMeta,
+  cell: OutCell,
+  rowIndex: number,
+  isFirstRow: boolean,
+  isLastRow: boolean,
+  endRow: number,
+): string {
+  const rowSpan = Math.min(rowIndex + cell.rowSpan, endRow) - rowIndex;
+  const isFirstCol = cell.gridIndex === 0;
+  const isLastCol = cell.gridIndex + cell.colSpan >= meta.totalCols;
+
+  // 边框：单元格自身 > 本表外框（首行/首列/末行/末列）> 表格内部线
+  const resolve = (name: 'top' | 'bottom' | 'left' | 'right'): Border | null | undefined => {
+    const own = cell.borders[name];
+    if (own !== undefined) return own;
+    if (name === 'top') return isFirstRow ? meta.edges.top : meta.edges.insideH;
+    if (name === 'bottom') return isLastRow ? meta.edges.bottom : meta.edges.insideH;
+    if (name === 'left') return isFirstCol ? meta.edges.left : meta.edges.insideV;
+    return isLastCol ? meta.edges.right : meta.edges.insideV;
+  };
+
+  const css: string[] = [];
+  for (const name of ['top', 'bottom', 'left', 'right'] as const) {
+    const value = borderCss(resolve(name));
+    if (value) css.push(`border-${name}:${value}`);
+  }
+  if (cell.baseCss) css.push(cell.baseCss);
+
   const attrs: string[] = [];
   if (cell.colSpan > 1) attrs.push(`colspan="${cell.colSpan}"`);
-  if (cell.rowSpan > 1) attrs.push(`rowspan="${cell.rowSpan}"`);
-  return `<td${attrs.length > 0 ? ` ${attrs.join(' ')}` : ''} style="${cell.css}">${cell.content}</td>`;
+  if (rowSpan > 1) attrs.push(`rowspan="${rowSpan}"`);
+
+  const content =
+    cell.flow.map((item) => (item.kind === 'block' ? item.html : '')).join('') || '&nbsp;';
+  return `<td${attrs.length > 0 ? ` ${attrs.join(' ')}` : ''} style="${css.join(';')}">${content}</td>`;
 }
 
 /* ------------------------------------------------------------------ 块级内容 */
 
-function renderParagraph(p: El, ctx: Ctx): string {
+function renderParagraphFlow(p: El, ctx: Ctx): Flow {
   const pPr = kid(p, 'pPr');
   const chain = styleChain(ctx.sheet, wVal(kid(pPr, 'pStyle')));
 
@@ -666,30 +830,66 @@ function renderParagraph(p: El, ctx: Ctx): string {
 
   const baseFont = readFont(baseRPrs, ctx.pageFont);
   const css = [paragraphCss(pPrs), fontCss(baseFont)].filter(Boolean).join(';');
-  const inner = renderInline(p, ctx, baseRPrs, baseFont);
-  return `<p style="${css}">${inner || '&nbsp;'}</p>`;
+  const segments = renderInlineSegments(p, ctx, baseRPrs, baseFont);
+
+  const flow: Flow = [];
+  if (breaksBeforeParagraph(pPr)) flow.push(BREAK);
+
+  if (segments.length <= 1) {
+    // 段内没有分页点：保持原有行为（空段落输出 &nbsp; 占位）
+    flow.push({ kind: 'block', html: `<p style="${css}">${segments[0] || '&nbsp;'}</p>` });
+  } else {
+    // 段内出现分页点：空片段不产出 <p>，消解「只承载分页符的空段落」
+    segments.forEach((segment, index) => {
+      if (index > 0) flow.push(BREAK);
+      if (segment) flow.push({ kind: 'block', html: `<p style="${css}">${segment}</p>` });
+    });
+  }
+
+  if (breaksAfterParagraph(pPr)) flow.push(BREAK);
+  return flow;
 }
 
-function renderBlockChildren(parent: El, ctx: Ctx): string {
-  let html = '';
+function renderBlockFlow(parent: El, ctx: Ctx): Flow {
+  const flow: Flow = [];
   for (const child of childEls(parent)) {
     switch (child.localName) {
       case 'p':
-        html += renderParagraph(child, ctx);
+        flow.push(...renderParagraphFlow(child, ctx));
         break;
       case 'tbl':
-        html += renderTable(child, ctx);
+        flow.push(...renderTableFlow(child, ctx));
         break;
       case 'sdt': {
         const box = kid(child, 'sdtContent');
-        if (box) html += renderBlockChildren(box, ctx);
+        if (box) flow.push(...renderBlockFlow(box, ctx));
         break;
       }
       default:
         break;
     }
   }
-  return html;
+  return flow;
+}
+
+/** 按分页点把流切成页；当前页为空时忽略分页点，末尾空页丢弃 */
+function flowToPages(flow: Flow): string[][] {
+  const pages: string[][] = [];
+  let current: string[] = [];
+
+  for (const item of flow) {
+    if (item.kind === 'break') {
+      if (current.length > 0) {
+        pages.push(current);
+        current = [];
+      }
+      continue;
+    }
+    current.push(item.html);
+  }
+
+  if (current.length > 0) pages.push(current);
+  return pages;
 }
 
 /* ------------------------------------------------------------------ 页面设置 */
@@ -785,9 +985,16 @@ export async function docxToTemplate(data: ArrayBuffer): Promise<string> {
   const defaultFont = readFont([sheet.defaultRPr], pageFont);
 
   const ctx: Ctx = { sheet, images, pageFont: defaultFont };
-  const html = renderBlockChildren(body, ctx).trim();
-  if (!html) throw new Error('这个 Word 文档没有可转换的内容');
+  const flow = renderBlockFlow(body, ctx);
+  const pages = flowToPages(flow);
+  if (pages.length === 0) throw new Error('这个 Word 文档没有可转换的内容');
 
   const css = `${A4_DOCX_BASE_CSS}\n${pageCss(kid(body, 'sectPr'), defaultFont)}`;
-  return `<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8" />\n<style>\n${css}\n</style>\n</head>\n<body>\n<div class="page">\n${html}\n</div>\n</body>\n</html>`;
+  // 有明确分页信号时按源文档分页输出（.docx-page 标记供导出侧逐页渲染）；
+  // 没有分页信号时退回单页，导出侧仍走「按 A4 高度切片」的启发式分页
+  const pageHtml = flowHasBreak(flow)
+    ? pages.map((blocks) => `<div class="page docx-page">\n${blocks.join('\n')}\n</div>`).join('\n')
+    : `<div class="page">\n${pages[0].join('\n')}\n</div>`;
+
+  return `<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8" />\n<style>\n${css}\n</style>\n</head>\n<body>\n${pageHtml}\n</body>\n</html>`;
 }

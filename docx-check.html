@@ -161,9 +161,28 @@
           : await buildDocx();
         const html = await docxToTemplate(data);
         out.textContent = html;
+
+        const pages = (html.match(/class="page/g) ?? []).length;
+        const docxPages = (html.match(/docx-page/g) ?? []).length;
+        const summary = `${sampleUrl ?? '内置示例'} · pages=${pages}（docx-page=${docxPages}）`;
+        status.textContent = `转换成功 · ${summary} · 正在生成 PDF…`;
+
+        // 预览按内容实际高度撑开，多页时纵向堆叠、可滚动
+        view.onload = () => {
+          const doc = view.contentDocument;
+          if (doc?.documentElement) {
+            view.style.height = `${doc.documentElement.scrollHeight}px`;
+          }
+        };
         // 应用内预览/导出会注入 html,body{margin:0}（见 buildDocument），这里对齐以还原真实效果
         view.srcdoc = html.replace(/<head>/i, '<head><style>html,body{margin:0}</style>');
-        status.textContent = `转换成功 · ${sampleUrl ?? '内置示例'} · ${html.length} 字符`;
+
+        // 顺带验证导出管线的分页结果：PDF 页数 = /Type /Page 对象个数
+        const { renderPdfBlob } = await import('/src/pdf/render.ts');
+        const pdfText = await (await renderPdfBlob(html, 1)).text();
+        const pdfPages = (pdfText.match(/\/Type\s*\/Page(?![s])/g) ?? []).length;
+
+        status.textContent = `转换成功 · ${summary} · pdfPages=${pdfPages} · ${html.length} 字符`;
       } catch (error) {
         status.textContent = `转换失败：${error.message}`;
         out.textContent = String(error.stack ?? error);

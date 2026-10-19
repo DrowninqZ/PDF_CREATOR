@@ -78,6 +78,9 @@ async function withHiddenFrame<T>(
     await loadFrame(frame, html);
     const doc = frame.contentDocument;
     if (!doc) throw new Error('无法创建渲染容器');
+    // 多页文档会被固定高度裁掉，按内容实际高度把离屏容器撑高
+    const contentHeight = doc.documentElement.scrollHeight;
+    if (contentHeight > A4_HEIGHT_PX) frame.style.height = `${contentHeight}px`;
     return await task(doc);
   } finally {
     frame.remove();
@@ -127,43 +130,57 @@ function computePageBreaks(doc: Document, scale: number): number[] {
 }
 
 /** 把一份 HTML 渲染为 canvas（含分页切点），内容超出 A4 高度时按切点分页 */
-async function htmlToCanvas(
-  html: string,
-  scale: number,
-): Promise<{ canvas: HTMLCanvasElement; breaks: number[] }> {
+async function htmlToPageCanvases(html: string, scale: number): Promise<HTMLCanvasElement[]> {
   return withHiddenFrame(html, async (doc) => {
     await waitForAssets(doc);
-    const target = doc.documentElement;
-    const breaks = computePageBreaks(doc, scale);
-    const canvas = await html2canvas(target, {
-      scale,
-      backgroundColor: '#ffffff',
-      useCORS: true,
-      logging: false,
-      width: target.scrollWidth,
-      height: target.scrollHeight,
-    });
-    return { canvas, breaks };
+
+    const pageEls = Array.from(doc.querySelectorAll<HTMLElement>('.page'));
+    // 逐页模式：文档带分页信号（多个 .page，或带 .docx-page 标记）时按元素逐页截图
+    const pageMode = pageEls.length > 1 || !!doc.querySelector('.docx-page');
+
+    if (!pageMode) {
+      // 回退：整篇渲染后按 A4 高度启发式切片（HTML 模板等无分页信号的文档）
+      const target = doc.documentElement;
+      const breaks = computePageBreaks(doc, scale);
+      const canvas = await html2canvas(target, {
+        scale,
+        backgroundColor: '#ffffff',
+        useCORS: true,
+        logging: false,
+        width: target.scrollWidth,
+        height: target.scrollHeight,
+      });
+      return sliceCanvas(canvas, breaks);
+    }
+
+    // 串行截图：扫描件整页大图时逐页并发会显著抬高内存峰值
+    const pages: HTMLCanvasElement[] = [];
+    for (const element of pageEls) {
+      pages.push(
+        await html2canvas(element, {
+          scale,
+          backgroundColor: '#ffffff',
+          useCORS: true,
+          logging: false,
+          width: element.scrollWidth,
+          height: element.scrollHeight,
+          windowWidth: element.scrollWidth,
+          windowHeight: element.scrollHeight,
+        }),
+      );
+    }
+    return pages;
   });
 }
 
 /**
- * 把一个 canvas 按分页切点切片追加到 PDF。
+ * 按分页切点把一张长图切成多页 canvas。
  * breaks 为每页起始位置的 canvas 像素坐标；每页高度可能小于 A4（切点上移留下的空白）。
- * startOnNewPage 为 true 时，第一片也会新起一页（用于把多份表单合并进同一个 PDF）。
- * 返回新增的页数。
  */
-function appendCanvasToPdf(
-  pdf: jsPDF,
-  canvas: HTMLCanvasElement,
-  breaks: number[],
-  startOnNewPage: boolean,
-): number {
-  const pxPerMm = canvas.width / PAGE_WIDTH_MM;
+function sliceCanvas(canvas: HTMLCanvasElement, breaks: number[]): HTMLCanvasElement[] {
   // 小于该高度的残差视为舍入误差，不再单独分页
   const RESIDUE_TOLERANCE_PX = 2;
-
-  if (canvas.height <= RESIDUE_TOLERANCE_PX) return 0;
+  if (canvas.height <= RESIDUE_TOLERANCE_PX) return [];
 
   const bounds = [0];
   for (const value of breaks) {
@@ -175,13 +192,10 @@ function appendCanvasToPdf(
   }
   bounds.push(canvas.height);
 
-  let pages = 0;
-  let needNewPage = startOnNewPage;
-
+  const pages: HTMLCanvasElement[] = [];
   for (let index = 0; index < bounds.length - 1; index += 1) {
     const start = bounds[index];
     const sliceHeight = bounds[index + 1] - start;
-    if (needNewPage) pdf.addPage();
 
     const slice = document.createElement('canvas');
     slice.width = canvas.width;
@@ -202,21 +216,33 @@ function appendCanvasToPdf(
       sliceHeight,
     );
 
-    // 表单以文字为主，PNG 无损，可避免 JPEG 压缩带来的文字发虚
-    pdf.addImage(
-      slice.toDataURL('image/png'),
-      'PNG',
-      0,
-      0,
-      PAGE_WIDTH_MM,
-      sliceHeight / pxPerMm,
-    );
-
-    pages += 1;
-    needNewPage = true;
+    pages.push(slice);
   }
 
   return pages;
+}
+
+/**
+ * 把一页 canvas 追加到 PDF 的当前页。
+ * 一页内容因字体差异比 A4 略高时，等比缩小塞进一张 A4（保页数、不丢内容）。
+ */
+function addFitted(pdf: jsPDF, canvas: HTMLCanvasElement): void {
+  const pxPerMm = canvas.width / PAGE_WIDTH_MM;
+  const naturalHeight = canvas.height / pxPerMm;
+
+  let width = PAGE_WIDTH_MM;
+  let height = naturalHeight;
+  let x = 0;
+
+  if (naturalHeight > PAGE_HEIGHT_MM + 0.5) {
+    const factor = PAGE_HEIGHT_MM / naturalHeight;
+    width = PAGE_WIDTH_MM * factor;
+    height = PAGE_HEIGHT_MM;
+    x = (PAGE_WIDTH_MM - width) / 2;
+  }
+
+  // 表单以文字为主，PNG 无损，可避免 JPEG 压缩带来的文字发虚
+  pdf.addImage(canvas.toDataURL('image/png'), 'PNG', x, 0, width, height);
 }
 
 function createPdf(): jsPDF {
@@ -230,10 +256,16 @@ function createPdf(): jsPDF {
 /** 把一份完整 HTML 文档渲染成 A4 PDF Blob（纯前端，无需服务端） */
 export async function renderPdfBlob(html: string, scale = 2): Promise<Blob> {
   const pdf = createPdf();
-  const { canvas, breaks } = await htmlToCanvas(html, scale);
-  if (appendCanvasToPdf(pdf, canvas, breaks, false) === 0) {
+  const pages = await htmlToPageCanvases(html, scale);
+  if (pages.length === 0) {
     throw new Error('模板内容为空，无法生成 PDF');
   }
+
+  pages.forEach((canvas, index) => {
+    if (index > 0) pdf.addPage();
+    addFitted(pdf, canvas);
+  });
+
   return pdf.output('blob');
 }
 
@@ -246,8 +278,12 @@ export async function renderMergedPdfBlob(htmlList: string[], scale = 2): Promis
   let totalPages = 0;
 
   for (const html of htmlList) {
-    const { canvas, breaks } = await htmlToCanvas(html, scale);
-    totalPages += appendCanvasToPdf(pdf, canvas, breaks, totalPages > 0);
+    const pages = await htmlToPageCanvases(html, scale);
+    for (const canvas of pages) {
+      if (totalPages > 0) pdf.addPage();
+      addFitted(pdf, canvas);
+      totalPages += 1;
+    }
   }
 
   if (totalPages === 0) {

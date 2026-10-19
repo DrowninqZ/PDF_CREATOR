@@ -202,8 +202,9 @@ export function TemplateEditor({
         range.deleteContents();
         range.insertNode(chip);
       } else {
-        // 没在表单里落过光标时，落到 A4 页面内容末尾，避免掉到页面外面看不见
-        const page = docEl.querySelector('.page');
+        // 没在表单里落过光标时，落到最后一页的 A4 内容末尾，避免掉到页面外面看不见
+        const pages = docEl.querySelectorAll('.page');
+        const page = pages.length > 0 ? pages[pages.length - 1] : null;
         (page ?? docEl).appendChild(chip);
       }
 
