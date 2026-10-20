@@ -1,7 +1,7 @@
 {
   "name": "lark-base-form-pdf",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "飞书多维表格插件：按 A4 模板批量生成人员信息表单 PDF",
   "scripts": {

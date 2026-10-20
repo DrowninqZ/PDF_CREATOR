@@ -346,6 +346,18 @@ function mergeSegments(dst: string[], src: string[]): void {
 
 /* ---- 行内内容（返回「以分页点分隔」的片段序列） ---- */
 
+/**
+ * Word 里的连续空格是有意义的排版（如签名前的整段留白），
+ * HTML 却会把连续空格折叠成一个，导致留白严重缩水。
+ * 这里把会被折叠的空格换成不换行空格，保住原始间距；
+ * 句中单独的普通空格保持原样，不影响正常换行。
+ * 必须在 escapeHtml 之后调用：否则生成的 `&` 会被二次转义。
+ */
+const toNbsp = (matched: string): string => '&nbsp;'.repeat(matched.length);
+
+const keepSpaces = (escaped: string): string =>
+  escaped.replace(/^ +| +$/g, toNbsp).replace(/ {2,}/g, toNbsp);
+
 /** 单个 run 内部：文字、换行、制表符、图片。分页标记处切断片段 */
 function renderRunContentSegments(run: El, ctx: Ctx): string[] {
   const segments: string[] = [];
@@ -365,7 +377,7 @@ function renderRunContentSegments(run: El, ctx: Ctx): string[] {
         else buffer += '<br>';
         break;
       case 't':
-        buffer += escapeHtml(child.textContent ?? '');
+        buffer += keepSpaces(escapeHtml(child.textContent ?? ''));
         break;
       case 'tab':
         buffer += '<span style="display:inline-block;width:21pt"></span>';
