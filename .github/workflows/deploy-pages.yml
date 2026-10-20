@@ -1,0 +1,52 @@
+name: Deploy plugin to GitHub Pages
+
+# 把 dist 发布到 GitHub Pages，供飞书多维表格「自定义插件」的服务地址使用。
+# 地址形如 https://<用户名>.github.io/PDF_CREATOR/
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只跑一次发布，后推的取消前一次未完成的
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # vite 8 要求 node ^20.19.0 || >=22.12.0
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # 不注入 VITE_ANALYTICS_ENDPOINT：CI 里没有 .env，
+      # 产物不含上报地址，插件完全离线，不会产生任何后台请求。
+      - run: npm run build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
