@@ -826,11 +826,18 @@ function renderParagraphFlow(p: El, ctx: Ctx): Flow {
   const chain = styleChain(ctx.sheet, wVal(kid(pPr, 'pStyle')));
 
   const pPrs: (El | null)[] = [ctx.sheet.defaultPPr, ...chain.map((d) => d.pPr), pPr];
-  const baseRPrs: (El | null)[] = [ctx.sheet.defaultRPr, ...chain.map((d) => d.rPr), kid(pPr, 'rPr')];
 
-  const baseFont = readFont(baseRPrs, ctx.pageFont);
-  const css = [paragraphCss(pPrs), fontCss(baseFont)].filter(Boolean).join(';');
-  const segments = renderInlineSegments(p, ctx, baseRPrs, baseFont);
+  // run 的字体只继承文档默认值与段落样式链。
+  // w:pPr/w:rPr 描述的是段落标记（¶）自身，Word 不会把它传给正文；
+  // 一旦并进 run 的继承链，正文就会误取到 ¶ 的加粗、字号与字体。
+  const runPrs: (El | null)[] = [ctx.sheet.defaultRPr, ...chain.map((d) => d.rPr)];
+
+  // 段落盒子仍保留 ¶ 的字体：空段落没有 run，行高要靠它撑出与 Word 一致的空白。
+  const boxFont = readFont([...runPrs, kid(pPr, 'rPr')], ctx.pageFont);
+  const runFont = readFont(runPrs, ctx.pageFont);
+
+  const css = [paragraphCss(pPrs), fontCss(boxFont)].filter(Boolean).join(';');
+  const segments = renderInlineSegments(p, ctx, runPrs, runFont);
 
   const flow: Flow = [];
   if (breaksBeforeParagraph(pPr)) flow.push(BREAK);

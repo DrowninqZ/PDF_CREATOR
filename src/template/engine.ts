@@ -52,12 +52,20 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
-/** 用数据填充模板正文中的占位符（值会做 HTML 转义） */
+/**
+ * 代入后的数据字段统一使用常规字重。
+ * 承载字段的位置常带加粗（Word 里标签普遍加粗，单元格、段落标记也会带 w:b），
+ * 纯文本替换会让值继承成加粗；用内联样式把值钉回常规字重，标签的加粗不受影响。
+ */
+const FIELD_VALUE_STYLE = 'font-weight:400';
+
+/** 用数据填充模板正文中的占位符（值会做 HTML 转义并强制不加粗） */
 export function fillTemplate(body: string, values: Record<string, string>): string {
   PLACEHOLDER_RE.lastIndex = 0;
   return body.replace(PLACEHOLDER_RE, (_full, key: string) => {
     const value = values[key];
-    return value === undefined || value === null ? '' : escapeHtml(String(value));
+    if (value === undefined || value === null || value === '') return '';
+    return `<span style="${FIELD_VALUE_STYLE}">${escapeHtml(String(value))}</span>`;
   });
 }
 
