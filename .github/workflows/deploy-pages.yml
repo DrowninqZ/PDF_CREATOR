@@ -31,8 +31,6 @@ jobs:
 
       - run: npm ci
 
-      # 不注入 VITE_ANALYTICS_ENDPOINT：CI 里没有 .env，
-      # 产物不含上报地址，插件完全离线，不会产生任何后台请求。
       - run: npm run build
 
       - uses: actions/configure-pages@v5
