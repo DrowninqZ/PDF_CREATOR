@@ -52,6 +52,15 @@ body {
   font-weight: 600;
 }
 
+/* 版本号：跟在标题后的小号灰字，便于确认线上运行版本 */
+.app-version {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  vertical-align: 1px;
+}
+
 /*
  * 配置区在左、预览固定在右。两栏按比例自适应、永不上下堆叠：
  * 无论飞书侧边栏（窄）还是独立页（宽）打开，预览都常驻右侧。

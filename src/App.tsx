@@ -642,7 +642,10 @@ export default function App() {
     <div className="app">
       <header className="app-head">
         <div>
-          <h1>表单 PDF 生成器</h1>
+          <h1>
+            表单 PDF 生成器
+            <span className="app-version">v{__APP_VERSION__}</span>
+          </h1>
           <p className="muted">
             按 A4 模板批量生成人员信息表单 PDF，支持单独下载、打包下载与回写附件字段
           </p>
