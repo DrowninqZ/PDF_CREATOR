@@ -26,10 +26,3 @@ pnpm-debug.log*
 
 # 缓存
 .vite
-
-# 统计服务的本地数据库
-server/data
-
-# 部署包与发布产物
-pdf-creator-deploy
-release
